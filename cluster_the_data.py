@@ -4,6 +4,11 @@ import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
 from collections import defaultdict
+
+import analysis_per_var.heartrate
+from analysis_per_var.epoch_walking import calc_epoch_running_walking
+
+
 def generate_stats(df):
     # Assuming your DataFrame is named df and the column is 'timestamp_column'
     # Convert the 'timestamp_column' to pandas datetime format
@@ -26,6 +31,151 @@ def hist_visualize_stats_per_all(data_dict):
     plt.savefig('Distribution of deep_sleep_avg_datapoints_per_day per day.png', dpi=300)
     plt.show()
 
+def calc_epoch_statistics(data, unique_ids):
+    df = data['epoch']
+    import pandas as pd
+    import numpy as np
+
+    # Assuming df is your DataFrame and it has columns ['userId', 'steps', 'distanceInMeters', 'startTimeDate']
+
+    # Convert distanceInMeters to km
+    df['distanceInKm'] = df['distanceInMeters'] / 1000
+
+    # Parse startTimeDate to datetime
+    df['startTimeDate'] = pd.to_datetime(df['startTimeDate'])
+    df['day'] = df['startTimeDate'].dt.date
+    df['week'] = df['startTimeDate'].dt.week
+
+    # Define the hour bins with labels
+    bins = np.arange(0, 25, 1)
+    labels = [f'{str(i).zfill(2)}:00-{str(i + 1).zfill(2)}:00' for i in bins[:-1]]
+    df['hour_bin'] = pd.cut(df['startTimeDate'].dt.hour, bins=bins, labels=labels, include_lowest=True, right=False)
+
+    # Calculate daily total
+    daily_total = df.groupby(['userId', 'day']).agg({'steps': ['sum'], 'distanceInKm': ['sum']}).reset_index()
+    daily_total.columns = ['userId', 'day', 'daily_steps', 'daily_distance']
+
+    # Calculate the number of days with zero distance for each user
+    zero_distance_days = df[df['distanceInKm'] == 0].groupby('userId')['day'].nunique().reset_index().rename(columns={'day': 'zero_distance_days'})
+
+    # Calculate the number of days with non-zero steps and distance for each user
+    non_zero_days = df[df['distanceInKm'] != 0].groupby('userId')['day'].nunique().reset_index().rename(columns={'day': 'non_zero_days'})
+    non_zero_steps_days = df[df['steps'] != 0].groupby('userId')['day'].nunique().reset_index().rename(columns={'day': 'non_zero_steps_days'})
+
+    # Calculate weekly total
+    weekly_total = df.groupby(['userId', 'week']).agg({'steps': ['sum'], 'distanceInKm': ['sum']}).reset_index()
+    weekly_total.columns = ['userId', 'week', 'weekly_steps', 'weekly_distance']
+
+    # Calculate the number of unique days and weeks for each user
+    num_days = df.groupby('userId')['day'].nunique().reset_index().rename(columns={'day': 'num_days'})
+    num_weeks = df.groupby('userId')['week'].nunique().reset_index().rename(columns={'week': 'num_weeks'})
+
+    # Join the total steps and distance with the number of days and weeks and zero distance days
+    daily = daily_total.groupby('userId').agg({'daily_steps': ['sum'], 'daily_distance': ['sum']}).reset_index()
+    daily.columns = ['userId', 'total_steps', 'total_distance']
+    daily = daily.merge(num_days, on='userId', how='left')
+    daily = daily.merge(non_zero_days, on='userId', how='left')
+    daily = daily.merge(non_zero_steps_days, on='userId', how='left')
+    daily = daily.merge(zero_distance_days, on='userId', how='left')
+
+    weekly = weekly_total.groupby('userId').agg({'weekly_steps': ['sum'], 'weekly_distance': ['sum']}).reset_index()
+    weekly.columns = ['userId', 'total_steps_week', 'total_distance_week']
+    weekly = weekly.merge(num_weeks, on='userId', how='left')
+
+    # Calculate the averages
+    daily['avg_steps_per_day'] = daily['total_steps'] / daily['num_days']
+    daily['avg_steps_per_day_non_zero'] = daily['total_steps'] / daily['non_zero_steps_days']
+    daily['avg_distance_per_day'] = daily['total_distance'] / daily['num_days']
+    daily['avg_distance_per_day_non_zero'] = daily['total_distance'] / daily['non_zero_days']
+
+    weekly['avg_steps_per_week'] = weekly['total_steps_week'] / weekly['num_weeks']
+    weekly['avg_distance_per_week'] = weekly['total_distance_week'] / weekly['num_weeks']
+
+    # Calculate time bins
+    hourly = df.groupby(['userId', 'hour_bin']).agg({'steps': ['mean'], 'distanceInKm': ['mean']}).reset_index()
+    hourly.columns = ['userId', 'hour_bin', 'avg_steps_hourly', 'avg_distance_hourly']
+
+    # Convert 'hour_bin' to string
+    hourly['hour_bin'] = hourly['hour_bin'].astype(str)
+
+    # Pivot the hourly dataframe
+    hourly_pivot = hourly.pivot_table(index='userId', columns='hour_bin', values=['avg_steps_hourly', 'avg_distance_hourly']).reset_index()
+    hourly_pivot.columns = [f'{y}_{x}' if y != '' else x for x, y in hourly_pivot.columns]
+
+    # Merge all dataframes
+    result = pd.merge(daily, weekly, on='userId', how='outer')
+    result = pd.merge(result, hourly_pivot, on='userId', how='outer')
+    result.to_csv("epoch-stats.csv", index=False)
+    x =5
+
+    # Load the result DataFrame from the CSV file
+    df = pd.read_csv("epoch-stats.csv")
+
+    fig, axes = plt.subplots(2, 1, figsize=(10, 10))
+
+    # List of users
+    users = df['userId'].unique()
+
+    # Hour bins
+    hour_bins = [f'{str(i).zfill(2)}:00-{str(i + 1).zfill(2)}:00' for i in range(24)]
+
+    # Loop through each user
+    for user in users:
+        user_data = df[df['userId'] == user]
+
+        # Plot for average steps per hour
+        user_data.filter(regex='avg_steps_hourly').mean(axis=0).plot(ax=axes[0], marker='o', label=user)
+
+    axes[0].set_title('Average Steps per Hour for Each User')
+    axes[0].set_xticks(range(len(hour_bins)))
+    axes[0].set_xticklabels(hour_bins, rotation=45)
+    axes[0].set_xlabel('Hour of Day')
+    axes[0].set_ylabel('Average Steps')
+    # axes[0].legend()
+
+    for user in users:
+        user_data = df[df['userId'] == user]
+
+        # Plot for average distance in km per hour
+        user_data.filter(regex='avg_distance_hourly').mean(axis=0).plot(ax=axes[1], marker='o', label=user)
+
+    axes[1].set_title('Average Distance in Km per Hour for Each User')
+    axes[1].set_xticks(range(len(hour_bins)))
+    axes[1].set_xticklabels(hour_bins, rotation=45)
+    axes[1].set_xlabel('Hour of Day')
+    axes[1].set_ylabel('Average Distance in Km')
+    # axes[1].legend()
+
+    plt.tight_layout()  # To prevent overlap of the plots
+    plt.savefig('Average Distance in Km per Hour for Each User.png', dpi=300)
+    plt.show()
+    x =5
+
+
+    fig, axes = plt.subplots(2, 1, figsize=(10, 10))
+
+    # Plot for average steps per day
+    result.groupby('userId')['avg_steps_per_day'].mean().plot(kind='bar', ax=axes[0], color='g')
+    axes[0].set_title('Average Steps per Day for Each User')
+    axes[0].set_ylabel('Average Steps')
+    axes[0].set_xticklabels([])  # Remove x-axis labels
+
+    # Plot for average steps per week
+    result.groupby('userId')['avg_steps_per_week'].mean().plot(kind='bar', ax=axes[1], color='b')
+    axes[1].set_title('Average Steps per Week for Each User')
+    axes[1].set_ylabel('Average Steps')
+    axes[1].set_xticklabels([])  # Remove x-axis labels
+
+    plt.tight_layout()  # To prevent overlap of the plots
+
+    # Save the figure
+    plt.savefig('average_steps_per_day_and_week.png', dpi=300)
+
+    plt.show()
+
+
+    return result
+
 def preprocess_data(data):
     data['epoch'] = data['epoch'][['userId','userAccessToken','summaryId','activeKilocalories','steps','distanceInMeters','activeTimeInSeconds', 'startTimeInSeconds']]
     data['deep_sleep']['totalSeconds'] = data['deep_sleep']['endTimeInSeconds'] - data['deep_sleep']['startTimeInSeconds']
@@ -37,6 +187,10 @@ def preprocess_data(data):
     data['awake_sleep']['startTimeDate'] = pd.to_datetime(data['awake_sleep']['startTimeInSeconds'], unit='s')
     unique_ids = data['heart_rate_daily']['userId'].unique()
     unique_dict_ids = {}
+    analysis_per_var.heartrate.analyze_heart_rate(data['heart_rate_daily'],data['dailies_summary'])
+
+    # calc_epoch_statistics(data, unique_ids)
+    calc_epoch_running_walking(data,unique_ids)
     for id in unique_ids:
         filtered_light_sleep = data['light_sleep'][data['light_sleep']['userId'] == id].reset_index().drop(columns=['index','summaryId'],inplace=False)
         filtered_awake_sleep = data['awake_sleep'][data['awake_sleep']['userId'] == id].reset_index().drop(columns=['index','summaryId'],inplace=False)
